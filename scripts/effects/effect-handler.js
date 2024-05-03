@@ -24,16 +24,59 @@ export default class EffectHandler {
    * @param {boolean} params.overlay - if the effect is an overlay or not
    * @param {string[]} params.uuids - UUIDS of the actors to toggle the effect on
    */
-  async toggleEffect(effectName, { overlay, uuids }) {
-    for (const uuid of uuids) {
-      if (this.hasEffectApplied(effectName, uuid)) {
-        await this.removeEffect({ effectName, uuid });
-      } else {
-        let effect = game.dfreds.effectInterface.findEffectByName(effectName);
-        await this.addEffect({ effect: effect.toObject(), uuid, overlay });
-      }
-    }
-  }
+  async toggleEffect(effectName, { overlay, uuids, isStatusEffect, active }) {
+	for (const uuid of uuids) {
+		if (!isStatusEffect) {
+			if (this.hasEffectApplied(effectName, uuid)) {
+				await this.removeEffect({ effectName, uuid });
+			} else {
+				let effect = game.dfreds.effectInterface.findEffectByName(effectName);
+				await this.addEffect({ effect: effect.toObject(), uuid, overlay });
+			}
+		} else {
+			const actor = this._foundryHelpers.getActorByUuid(uuid);
+			if (!actor) return false;
+			const statusId = isStatusEffect.id;
+			if (!statusId) return false;
+			const existing = [];
+
+			// Find the effect with the static _id of the status effect
+			if (isStatusEffect._id) {
+				const effect = actor.effects.get(isStatusEffect._id);
+				if (effect) existing.push(effect.id);
+			}
+
+			// If no static _id, find all single-status effects that have this status
+			else {
+				for (const effect of actor.effects) {
+					const statuses = effect.statuses;
+					if (statuses.size === 1 && statuses.has(statusId))
+						existing.push(effect.id);
+				}
+			}
+
+			// Remove the existing effects unless the status effect is forced active
+			if (existing.length) {
+				if (active) return true;
+				await actor.deleteEmbeddedDocuments('ActiveEffect', existing);
+				return false;
+			}
+
+			// Create a new effect unless the status effect is forced inactive
+			if (!active && active !== undefined) return false;
+			const effect = await ActiveEffect.implementation.fromStatusEffect(
+				statusId
+			);
+			if (overlay) effect.updateSource({ 'flags.core.overlay': true });
+			await ActiveEffect.implementation.create(effect, {
+				parent: actor,
+				keepId: true,
+			});
+			return true;
+		}
+	}
+}
+
 
   /**
    * Checks to see if any of the current active effects applied to the actor
@@ -46,48 +89,47 @@ export default class EffectHandler {
    */
   hasEffectApplied(effectName, uuid) {
     const actor = this._foundryHelpers.getActorByUuid(uuid);
-    return actor?.effects?.some(
+    return actor?.appliedEffects?.some(
       (activeEffect) =>
         this._effectHelpers.isConvenient(activeEffect) &&
-        activeEffect?.name == effectName &&
-        !activeEffect?.disabled
+        activeEffect?.name == effectName 
     );
   }
 
   /**
-   * Removes the effect with the provided name from an actor matching the
+   * Removes the effect with the provided ID from an actor matching the
    * provided UUID
    *
    * @param {object} params - the effect parameters
-   * @param {string} params.effectName - the name of the effect to remove
+   * @param {string} params.effectName - the ID of the effect to remove (name or staticID)
    * @param {string} params.uuid - the uuid of the actor to remove the effect from
    * @param {string | undefined} params.origin - only removes the effect if the origin
    * matches. If undefined, removes any effect with the matching name
    */
-  async removeEffect({ effectName, uuid, origin }) {
+  async removeEffect({ effectID, uuid, origin }) {
     const actor = this._foundryHelpers.getActorByUuid(uuid);
 
     let effectToRemove;
 
     if (origin) {
-      effectToRemove = actor.effects.find(
+      effectToRemove = actor.appliedEffects.find(
         (activeEffect) =>
           this._effectHelpers.isConvenient(activeEffect) &&
-          activeEffect?.name == effectName &&
+          [activeEffect?._id, activeEffect?.name].some((eID) => eID === effectID) &&
           activeEffect?.origin == origin
       );
     } else {
-      effectToRemove = actor.effects.find(
+      effectToRemove = actor.appliedEffects.find(
         (activeEffect) =>
           this._effectHelpers.isConvenient(activeEffect) &&
-          activeEffect?.name == effectName
+          [activeEffect?._id, activeEffect?.name].some((eID) => eID === effectID)
       );
     }
 
     if (!effectToRemove) return;
 
     await effectToRemove.delete();
-    log(`Removed effect ${effectName} from ${actor.name} - ${actor.id}`);
+    log(`Removed effect ${effectToRemove.name} from ${actor.name} - ${actor.id}`);
   }
 
   /**
@@ -100,12 +142,21 @@ export default class EffectHandler {
    * @param {string} params.origin - the origin of the effect
    * @param {boolean} params.overlay - if the effect is an overlay or not
    */
-  async addEffect({ effect, uuid, origin, overlay }) {
+  async addEffect({ effect, uuid, origin, overlay, isStatusEffect }) {
     const actor = this._foundryHelpers.getActorByUuid(uuid);
     const activeEffectsToApply = [];
+    console.log(effect)
+    console.log(isStatusEffect)
+
+    if (isStatusEffect) {
+      const existing = actor.appliedEffects.find((eff) => eff._id === effect._id);
+      if (existing) await this.removeEffect({effectID: existing.id, uuid});
+      if (actor.token?.object.hasActiveHUD || actor.getActiveTokens()[0].hasActiveHUD) canvas.tokens.hud.refreshStatusIcons();
+      return ActiveEffect.implementation.create(effect, { parent: actor, origin, overlay, keepId: true });
+    }
 
     activeEffectsToApply.push(effect);
-
+/*
     if (effect.name.startsWith('Exhaustion')) {
       await this._removeAllExhaustionEffects(uuid);
     }
@@ -117,7 +168,7 @@ export default class EffectHandler {
     if (origin) {
       effect.origin = origin;
     }
-
+*/
     let coreFlags = {
       core: {
         overlay,
