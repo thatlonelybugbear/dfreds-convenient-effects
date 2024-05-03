@@ -259,12 +259,8 @@ export default class EffectDefinitions {
 
   /* Condition Effects */
   get _blinded() {
-    return this._effectHelpers.createActiveEffect({
-      name: 'Blinded',
-      description:
-        "- A blinded creature can't see and automatically fails any ability check that requires sight.<br/>- Attack rolls against the creature have advantage, and the creature's attack rolls have disadvantage.",
-      icon: 'modules/dfreds-convenient-effects/images/blinded.svg',
-      statuses: ['blinded'],
+    const effect = await ActiveEffect.implementation.fromStatusEffect('blinded');
+    effect.updateSource({
       changes: [
         {
           key: `flags.${this._flagPrefix}.disadvantage.attack.all`,
@@ -278,6 +274,7 @@ export default class EffectDefinitions {
         },
       ],
     });
+    return effect;
   }
 
   get _charmed() {
