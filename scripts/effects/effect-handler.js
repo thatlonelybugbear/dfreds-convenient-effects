@@ -35,9 +35,8 @@ export default class EffectHandler {
 			}
 		} else {
 			const actor = this._foundryHelpers.getActorByUuid(uuid);
-			if (!actor) return false;
+			if (!actor) continue;
 			const statusId = isStatusEffect.id;
-			if (!statusId) return false;
 			const existing = [];
 
 			// Find the effect with the static _id of the status effect
@@ -57,13 +56,13 @@ export default class EffectHandler {
 
 			// Remove the existing effects unless the status effect is forced active
 			if (existing.length) {
-				if (active) return true;
+				if (active) continue;
 				await actor.deleteEmbeddedDocuments('ActiveEffect', existing);
-				return false;
+				continue;
 			}
 
 			// Create a new effect unless the status effect is forced inactive
-			if (!active && active !== undefined) return false;
+			if (!active && active !== undefined) continue;
 			const effect = await ActiveEffect.implementation.fromStatusEffect(
 				statusId
 			);
@@ -72,7 +71,6 @@ export default class EffectHandler {
 				parent: actor,
 				keepId: true,
 			});
-			return true;
 		}
 	}
 }
