@@ -259,8 +259,8 @@ export default class EffectDefinitions {
 
   /* Condition Effects */
   get _blinded() {
-    const effect = await ActiveEffect.implementation.fromStatusEffect('blinded');
-    effect.updateSource({
+    return this._effectHelpers.statusEffect({
+      id: 'blinded',
       changes: [
         {
           key: `flags.${this._flagPrefix}.disadvantage.attack.all`,
@@ -274,7 +274,6 @@ export default class EffectDefinitions {
         },
       ],
     });
-    return effect;
   }
 
   get _charmed() {
