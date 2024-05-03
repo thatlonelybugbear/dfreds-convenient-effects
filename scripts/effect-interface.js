@@ -70,6 +70,38 @@ export default class EffectInterface {
   }
 
   /**
+   * Finds whether the effectName provided matches any of the default dnd5e status effects,
+   * by comparing it against the values of the CONFIG.statusEffects object
+   *
+   * @param {string} effectName - name of the effect
+   * @returns {object||false} - 
+   *                        {
+   *                          id: the effect.id of the effect or false, 
+   *                          staticID: the effect._id,
+   *                          isExhaustion: 
+   *                                the exhaustion level change (eg. +2 for "Exhaustion +2", -4 for "Exhaustion -4"),
+   *                                || null if the effectName is "Exhaustion"
+   *                                || false if not Exhaustion
+   *                        }
+   *                          || false if not a statusEffect or the modifyStatusEffects is other than NONE
+   */
+  isStatusEffect(effectName) {
+    if (this._settings.modifyStatusEffects !== 'none') return false;
+    const regex = /^(\w+)(?:\s*([+-]?\d+))?$/;
+    const [_, stringEffectName, numberEffectName] = effectName.match(regex) ?? [];
+    const checkTranslationsName = Object.values(CONFIG.statusEffects).find((effect) => effect.name == stringEffectName);
+    if (!checkTranslationsName) return false;
+    const isExhaustion =
+    	checkTranslationsName._id ===
+    	CONFIG.statusEffects.find((effect) => effect.id == 'exhaustion')._id
+    		? numberEffectName ?? null
+    		: false;
+    if (checkTranslationsName)
+      return { id: checkTranslationsName.id, staticID: checkTranslationsName._id, isExhaustion };
+    else return false;
+  }
+
+  /**
    * Toggles the effect on the provided actor UUIDS as the GM via sockets. If no actor
    * UUIDs are provided, it finds one of these in this priority:
    *
@@ -83,7 +115,7 @@ export default class EffectInterface {
    * @param {string[]} params.uuids - UUIDS of the actors to toggle the effect on
    * @returns {Promise} a promise that resolves when the GM socket function completes
    */
-  async toggleEffect(effectName, { overlay, uuids = [] } = {}) {
+   async toggleEffect(effectName, { overlay, uuids = [] } = {}) {
     if (uuids.length == 0) {
       uuids = this._foundryHelpers.getActorUuids();
     }
@@ -94,22 +126,26 @@ export default class EffectInterface {
       );
       return;
     }
-
-    let effect = this.findEffectByName(effectName);
-
-    if (!effect) {
-      ui.notifications.error(`Effect ${effectName} was not found`);
-      return;
+    
+    let effect;
+    const isStatusEffect = this.isStatusEffect(effectName);
+    if (!isStatusEffect) {
+      effect = this.findEffectByName(effectName);
+      if (!effect) {
+        ui.notifications.error(`Effect ${effectName} was not found`);
+        return;
+      }
+      
+      if (this.hasNestedEffects(effect)) {
+        effect = await this._getNestedEffectSelection(effect);
+        if (!effect) return; // dialog closed without selecting one
+      }
     }
 
-    if (this.hasNestedEffects(effect)) {
-      effect = await this._getNestedEffectSelection(effect);
-      if (!effect) return; // dialog closed without selecting one
-    }
-
-    return this._socket.executeAsGM('toggleEffect', effect.name, {
+    return this._socket.executeAsGM('toggleEffect', effect?.name ?? effectName, {
       overlay,
       uuids,
+      isStatusEffect,
     });
   }
 
@@ -137,12 +173,20 @@ export default class EffectInterface {
    * @returns {Promise} a promise that resolves when the GM socket function completes
    */
   async removeEffect({ effectName, uuid, origin }) {
-    let effect = this.findEffectByName(effectName);
-
-    if (!effect) {
-      ui.notifications.error(`Effect ${effectName} could not be found`);
-      return;
-    }
+    let effect;
+    const isStatusEffect = this.isStatusEffect(effectName);
+    console.log(isStatusEffect)
+    if (!isStatusEffect) {
+      effect = this.findEffectByName(effectName);
+        if (!effect) {
+        ui.notifications.error(`Effect ${effectName} could not be found`);
+        return;
+      }
+      if (this.hasNestedEffects(effect)) {
+        effect = await this._getNestedEffectSelection(effect);
+        if (!effect) return; // dialog closed without selecting one
+      }
+    }  
 
     const actor = this._foundryHelpers.getActorByUuid(uuid);
 
@@ -151,13 +195,8 @@ export default class EffectInterface {
       return;
     }
 
-    if (this.hasNestedEffects(effect)) {
-      effect = await this._getNestedEffectSelection(effect);
-      if (!effect) return; // dialog closed without selecting one
-    }
-
     return this._socket.executeAsGM('removeEffect', {
-      effectName: effect.name,
+      effectID: effect?.name ?? isStatusEffect.staticID,
       uuid,
       origin,
     });
@@ -175,30 +214,92 @@ export default class EffectInterface {
    * @returns {Promise} a promise that resolves when the GM socket function completes
    */
   async addEffect({ effectName, uuid, origin, overlay, metadata }) {
-    let effect = this.findEffectByName(effectName);
-
-    if (!effect) {
-      ui.notifications.error(`Effect ${effectName} could not be found`);
-      return;
-    }
-
+    let effect;
     const actor = this._foundryHelpers.getActorByUuid(uuid);
+    const token = actor.token?.object ?? actor.getActiveTokens()[0];
 
     if (!actor) {
       ui.notifications.error(`Actor ${uuid} could not be found`);
       return;
     }
 
-    if (this.hasNestedEffects(effect) > 0) {
-      effect = await this._getNestedEffectSelection(effect);
-      if (!effect) return; // dialog closed without selecting one
+    const isStatusEffect = this.isStatusEffect(effectName);
+    console.log(isStatusEffect)
+    if (isStatusEffect && isStatusEffect.isExhaustion === false) {
+      effect = actor.appliedEffects.find((effect)=>effect._id === isStatusEffect.staticID);
+      console.log(effect);
+      if (effect) 
+        await this._socket.executeAsGM('removeEffect', {
+          effectID: effect?._id,
+          uuid,
+        });
+      effect = await ActiveEffect.implementation.fromStatusEffect(isStatusEffect.id);
+      const updateSource = {
+        [`flags.${Constants.MODULE_ID}.${Constants.FLAGS.IS_CONVENIENT}`]: true
+      };
+      const changes = this.findEffectByName(effectName)?.changes || [];
+      if (changes.length)
+        foundry.utils.mergeObject(updateSource, { changes });     
+      effect.updateSource(updateSource);
+      console.log(effect)
     }
+    else if (isStatusEffect && isStatusEffect.isExhaustion !== false) {
+      const targetExhaustionLevel = isStatusEffect.isExhaustion;
+      const systemExhaustionLevels = CONFIG.statusEffects.find(e=>e.id=='exhaustion').levels;
+      const currentExhaustionlevel = actor.system.attributes.exhaustion ?? 0;
+      const newExhaustionLevel = 
+        !targetExhaustionLevel ? 
+        Math.min(currentExhaustionlevel + 1, systemExhaustionLevels) :
+          ['+', '-'].some((sign)=>targetExhaustionLevel.includes(sign)) ?
+            Math.clamped(Number(currentExhaustionlevel) + Number(targetExhaustionLevel), 0, systemExhaustionLevels) :
+             Math.clamped(Number(targetExhaustionLevel), 0, systemExhaustionLevels);
+      console.log(targetExhaustionLevel, newExhaustionLevel)
+      effect = actor.appliedEffects.find((effect)=>effect._id === isStatusEffect.staticID);
+      if (!newExhaustionLevel) 
+        return this._socket.executeAsGM('removeEffect', {
+          effectID: effect?._id,
+          uuid,
+        });
+      const name = `${CONFIG.statusEffects.find(e=>e.id=='exhaustion').name} ${newExhaustionLevel}`;
+      console.log(name)
+      const changes = this.findEffectByName(name)?.changes || [];
+      console.log(effect)
+      if (effect) 
+        await this._socket.executeAsGM('removeEffect', {
+          effectID: effect?._id,
+          uuid,
+        });
+      effect = await ActiveEffect.implementation.fromStatusEffect(isStatusEffect.id);
+      effect.updateSource({
+        [`flags.${Constants.MODULE_ID}.${Constants.FLAGS.IS_CONVENIENT}`]: true,
+        "flags.dnd5e.exhaustionLevel": Number(newExhaustionLevel),
+        "flags.dnd5e.originalExhaustion": Number(currentExhaustionlevel),
+        changes
+      });
+      effect = effect.toObject();
+      effect.name = name;
+    }
+    else {
+      effect = this.findEffectByName(effectName);
 
+      if (!effect) {
+        ui.notifications.error(`Effect ${effectName} could not be found`);
+        return;
+      }
+      
+      if (this.hasNestedEffects(effect) > 0) {
+        effect = await this._getNestedEffectSelection(effect);
+        if (!effect) return; // dialog closed without selecting one
+      }
+      effect = effect.toObject();
+  
+    }
     return this._socket.executeAsGM('addEffect', {
-      effect: effect.toObject(),
+      effect,
       uuid,
       origin,
       overlay,
+      isStatusEffect
     });
   }
 
@@ -213,10 +314,32 @@ export default class EffectInterface {
    * @returns {Promise} a promise that resolves when the GM socket function completes
    */
   async addEffectWith({ effectData, uuid, origin, overlay }) {
-    let effect = this._effectHelpers.createActiveEffect({
-      ...effectData,
-      origin,
-    });
+    if (foundry.utils.isEmpty(effectData)) {
+      ui.notifications.error('No effectData were provided!');
+      return;
+    }
+    let effect;
+    const effectName = effectData.name;
+    const isStatusEffect = effectName ? this.isStatusEffect(effectName) : false;
+    
+    if (isStatusEffect) {
+      effect = await ActiveEffect.implementation.fromStatusEffect(isStatusEffect.id);
+      foundry.utils.mergeObject(effectData.flags, {[`${Constants.MODULE_ID}.${Constants.FLAGS.IS_CONVENIENT}`]: true});
+      effect.updateSource(effectData);
+      console.log(effect);
+    }
+    else {
+      effect = this._effectHelpers.createActiveEffect({
+        ...effectData,
+        origin,
+      });
+      if (this.hasNestedEffects(effect)) {
+        effect = await this._getNestedEffectSelection(effect);
+        if (!effect) return; // dialog closed without selecting one
+      }
+      //effect = effect.toObject();
+    }
+
     const actor = this._foundryHelpers.getActorByUuid(uuid);
 
     if (!actor) {
@@ -224,16 +347,12 @@ export default class EffectInterface {
       return;
     }
 
-    if (this.hasNestedEffects(effect)) {
-      effect = await this._getNestedEffectSelection(effect);
-      if (!effect) return; // dialog closed without selecting one
-    }
-
     return this._socket.executeAsGM('addEffect', {
       effect: effect.toObject(),
       uuid,
       origin,
       overlay,
+      isStatusEffect
     });
   }
 
