@@ -5,7 +5,27 @@ export default class EffectHelpers {
   constructor() {
     this._settings = new Settings();
   }
+  async statusEffect({
+    id,
+    changes
+  }) {
+    if (this._settings.integrateWithAte) {
+      changes.push(...atlChanges);
+    }
 
+    if (this._settings.integrateWithTokenMagic) {
+      changes.push(...tokenMagicChanges);
+    }
+    const ceFlags = {};
+    ceFlags[Constants.MODULE_ID][Constants.FLAGS.IS_CONVENIENT] = true;
+
+    let effect = await ActiveEffect.implementation.fromStatusEffect(id);
+    effect.updateSource({
+      [`flags.${Constants.MODULE_ID}.${Constants.FLAGS.IS_CONVENIENT}`]: true,
+      changes
+    });
+    return ActiveEffect.implementation.create(effect, {parent: null, keepId: true});
+  };
   createActiveEffect({
     name,
     description = '',
